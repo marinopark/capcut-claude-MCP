@@ -1,0 +1,5 @@
+/.idea/
+
+# Ignore all dot-directories (e.g. .idea, .vscode, .venv)
+.*/
+
