@@ -11,6 +11,9 @@ to answer questions about your timeline, and writes brand-new draft folders you
 can open and finish inside CapCut. The deliverable is an **editable project**,
 not a rendered video — rendering/export is out of scope.
 
+Verified end-to-end on Windows with the international CapCut edition: generated
+drafts (video + text/subtitles) open and edit normally in CapCut.
+
 ## Requirements
 
 - **Python 3.11+** — that's it. **Nothing to install, no `pip`, no MCP SDK.**
@@ -102,12 +105,28 @@ The write path is deliberately conservative:
 4. **Atomic writes.** A new draft is fully assembled in a temp directory and
    then atomically moved into the drafts folder — you never see a half-written
    draft.
-5. **Path validation.** Media paths are normalized to absolute and checked for
-   existence before saving; missing files are surfaced as warnings, not silently
-   dropped.
+5. **Path validation.** Media paths are normalized to absolute (forward-slash,
+   as CapCut requires) and checked for existence before saving; missing files
+   are surfaced as warnings, not silently dropped.
 
 After `save_draft`, **restart CapCut** for the new project to appear in its
 project list.
+
+### How a generated draft passes CapCut's validation
+
+CapCut rejects drafts that look like they were copied from another machine
+("abnormal path"). To pass this check, `save_draft` writes:
+
+- `draft_content.json` with a **platform identity block harvested from one of
+  your existing drafts** (this machine's CapCut `device_id`, app version). No
+  identity is invented or sent anywhere — it is copied locally so CapCut
+  recognizes the draft as its own.
+- `draft_meta_info.json` with a populated `draft_materials` media registry.
+- `draft_virtual_store.json` with the material-id registry.
+
+CapCut generates everything else (covers, timelines, settings) on first open.
+For best results, have at least one existing CapCut project in your drafts
+folder — the identity harvest falls back to generic values without one.
 
 ## Known constraints & risks
 
@@ -125,6 +144,8 @@ project list.
   both.
 - **ffprobe needed for auto-duration.** Without ffprobe on `PATH`, `add_video` /
   `add_audio` cannot auto-detect media length — pass `duration_sec` explicitly.
+  Video pixel dimensions also can't be probed without it; they fall back to the
+  project's canvas size in the draft metadata (CapCut corrects them on open).
 
 ## Architecture
 
