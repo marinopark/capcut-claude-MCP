@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "capcut": {
+      "command": "python",
+      "args": ["src/capcut_mcp/server.py"]
+    }
+  }
+}

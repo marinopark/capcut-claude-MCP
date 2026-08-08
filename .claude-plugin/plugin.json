@@ -1,0 +1,5 @@
+{
+  "name": "capcut-mcp",
+  "version": "0.1.0",
+  "description": "Zero-dependency MCP server to read, analyze, and generate CapCut (international) local draft projects. Standard-library Python only."
+}

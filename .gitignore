@@ -6,3 +6,14 @@
 # IntelliJ module files
 *.iml
 
+# Python
+__pycache__/
+*.py[cod]
+
+# Throwaway recon scripts (findings recorded in docs/schema-notes.md)
+_inspect*.py
+
+# But keep the Claude Code plugin manifest (it's a required tracked file)
+!.claude-plugin/
+!.claude-plugin/**
+
