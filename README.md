@@ -35,6 +35,13 @@ Add the server to Claude Code:
 claude mcp add capcut -- python src/capcut_mcp/server.py
 ```
 
+To use it from any project (not just this repo), register it user-wide with an
+absolute path:
+
+```bash
+claude mcp add capcut --scope user -- python C:/path/to/capcut-claude-MCP/src/capcut_mcp/server.py
+```
+
 Or rely on the bundled `.mcp.json` (Claude Code auto-discovers it in the project
 root):
 
@@ -52,9 +59,44 @@ root):
 As a Claude Code **plugin**, the `.claude-plugin/plugin.json` manifest describes
 the package (`name`, `version`, `description`).
 
-Verify the connection, then run the `doctor` tool first — it reports whether the
-drafts directory was found, whether CapCut is running, the detected draft
-format, ffprobe availability, and read/write permissions.
+Verify the connection with `/mcp`, then run the `doctor` tool first — it reports
+whether the drafts directory was found, whether CapCut is running, the detected
+draft format, ffprobe availability, and read/write permissions.
+
+> **Note:** if you edit the server code, reconnect the server via `/mcp` — the
+> running process keeps the old code until restarted.
+
+## Usage
+
+You don't call the tools directly — just ask Claude in natural language and it
+picks the right tools.
+
+**Read / analyze** (safe while CapCut is open):
+
+```
+List my CapCut projects
+Analyze the "ep03" project
+Extract all captions from "ep01"
+Show me the video tracks in "ep03" — what speeds are the clips at?
+Export the captions of "ep01" as an SRT file
+Check "ep02" for missing media files
+```
+
+**Build a new project** (close CapCut first):
+
+```
+Create a 1920x1080 CapCut project called "intro".
+Add D:/footage/clip1.mp4 from 0s for 60 seconds,
+then add the caption "Opening" from 2s to 7s in yellow, and save it.
+```
+
+```
+Make a new CapCut project from this video and overlay subtitles.srt on it
+```
+
+After saving, (re)start CapCut and the project appears in its list, ready to
+edit. Remember: without ffprobe installed you must state each clip's duration
+("add it for 60 seconds") — see Known constraints.
 
 ## Tools
 
