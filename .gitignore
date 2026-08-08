@@ -13,6 +13,9 @@ __pycache__/
 # Throwaway recon scripts (findings recorded in docs/schema-notes.md)
 _inspect*.py
 
+# Local docs (contain machine-specific paths / recon notes)
+docs/
+
 # But keep the Claude Code plugin manifest (it's a required tracked file)
 !.claude-plugin/
 !.claude-plugin/**
