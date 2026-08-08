@@ -31,6 +31,7 @@ import os
 import re
 import shutil
 import tempfile
+import time
 import uuid
 from pathlib import Path
 
@@ -88,6 +89,65 @@ def _new_id() -> str:
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# Platform identity harvesting (Bug #28)
+# ---------------------------------------------------------------------------
+
+# CapCut validates a draft's provenance via the ``platform`` block in
+# ``draft_content.json`` — most importantly ``device_id``, this machine's CapCut
+# identity. A draft whose device_id is empty/foreign is treated as moved from
+# another machine and rejected with an "abnormal path" (비정상적인 경로) error.
+# We therefore HARVEST the platform block from an existing real draft in the
+# same drafts dir and stamp it onto drafts we write. Fallback values below are
+# only used when no readable sibling draft exists.
+_FALLBACK_PLATFORM = {
+    "os": "windows",
+    "os_version": "",
+    "app_id": 359289,
+    "app_version": "8.7.0",
+    "app_source": "cc",
+    "device_id": "",
+    "hard_disk_id": "",
+    "mac_address": "",
+}
+_FALLBACK_NEW_VERSION = "175.0.0"
+
+
+def _harvest_environment(drafts_dir: Path) -> tuple[dict, str]:
+    """Extract ``(platform_block, new_version)`` from a sibling real draft.
+
+    Scans ``drafts_dir`` for a readable (non-encrypted) ``draft_content.json``
+    and returns its ``platform`` (or ``last_modified_platform``) block plus its
+    ``new_version`` string. Best-effort: on any failure returns fallbacks.
+    """
+    try:
+        candidates = sorted(
+            drafts_dir.glob("*/draft_content.json"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+    except OSError:
+        candidates = []
+    for candidate in candidates:
+        try:
+            with open(candidate, "rb") as fh:
+                head = fh.read(1)
+                if head != b"{":
+                    continue  # encrypted draft
+                raw = head + fh.read()
+            data = json.loads(raw.decode("utf-8"))
+        except (OSError, ValueError):
+            continue
+        platform = data.get("platform") or data.get("last_modified_platform")
+        if not isinstance(platform, dict) or not platform.get("device_id"):
+            continue
+        new_version = data.get("new_version")
+        if not isinstance(new_version, str) or not new_version:
+            new_version = _FALLBACK_NEW_VERSION
+        return dict(platform), new_version
+    return dict(_FALLBACK_PLATFORM), _FALLBACK_NEW_VERSION
+
+
 def write_draft(project: Project, drafts_dir: Path, force: bool = False) -> Path:
     """Serialize ``project`` into a new draft folder under ``drafts_dir``.
 
@@ -113,7 +173,10 @@ def write_draft(project: Project, drafts_dir: Path, force: bool = False) -> Path
     # Normalize media paths / existence flags before serializing.
     validate_media_paths(project)
 
-    content = _build_draft_content(project)
+    # Harvest this machine's CapCut platform identity from a sibling draft so
+    # CapCut does not reject the new draft as foreign ("abnormal path", #28).
+    platform, new_version = _harvest_environment(drafts_dir)
+    content = _build_draft_content(project, platform=platform, new_version=new_version)
 
     drafts_dir.mkdir(parents=True, exist_ok=True)
 
@@ -124,7 +187,9 @@ def write_draft(project: Project, drafts_dir: Path, force: bool = False) -> Path
         staging_dir.mkdir(parents=True, exist_ok=False)
 
         _write_json(staging_dir / DRAFT_CONTENT_FILENAME, content)
-        _write_sidecars(staging_dir, project, content)
+        # Bug #26: sidecar path fields (draft_fold_path/root_path) must record
+        # the FINAL location, not the temp staging dir the files are written to.
+        _write_sidecars(staging_dir, target_dir, project, content)
 
         # If force and target exists, remove it just before the atomic move so
         # the window of a missing folder is minimal.
@@ -149,18 +214,30 @@ def write_draft(project: Project, drafts_dir: Path, force: bool = False) -> Path
     return target_dir
 
 
+def _to_slash_path(path: str) -> str:
+    """Absolute path with FORWARD slashes, as CapCut stores every path.
+
+    Bug #24: on Windows ``os.path.abspath`` yields back-slash paths
+    (``C:\\Users\\...``). Real CapCut drafts store every path with forward
+    slashes (``C:/Users/...``); a back-slash media path makes CapCut reject the
+    project with an "abnormal path" error. Normalize to forward slashes here so
+    both ``draft_content.json`` and ``draft_meta_info.json`` stay consistent.
+    """
+    return os.path.abspath(path).replace("\\", "/")
+
+
 def validate_media_paths(project: Project) -> list[str]:
     """Normalize each material path to absolute and flag missing files.
 
-    Mutates each :class:`Material` in place: ``path`` becomes an absolute path
-    string and ``exists`` reflects on-disk presence. Returns a list of
-    human-readable warnings for materials whose media file is missing.
+    Mutates each :class:`Material` in place: ``path`` becomes an absolute,
+    forward-slash path string and ``exists`` reflects on-disk presence. Returns
+    a list of human-readable warnings for materials whose media file is missing.
     """
     warnings: list[str] = []
     for material in project.materials.values():
         if not material.path:
             continue
-        abs_path = os.path.abspath(material.path)
+        abs_path = _to_slash_path(material.path)
         material.path = abs_path
         exists = os.path.isfile(abs_path)
         material.exists = exists
@@ -175,7 +252,11 @@ def validate_media_paths(project: Project) -> list[str]:
 # ---------------------------------------------------------------------------
 
 
-def _build_draft_content(project: Project) -> dict:
+def _build_draft_content(
+    project: Project,
+    platform: dict | None = None,
+    new_version: str | None = None,
+) -> dict:
     """Serialize the domain :class:`Project` into a ``draft_content.json`` dict.
 
     Emits: ``canvas_config`` (width/height/ratio), top-level ``fps`` and
@@ -189,6 +270,7 @@ def _build_draft_content(project: Project) -> dict:
 
     tracks = [_serialize_track(track) for track in project.tracks]
 
+    platform_block = dict(platform) if platform else dict(_FALLBACK_PLATFORM)
     return {
         "id": _new_id(),
         "canvas_config": {
@@ -203,7 +285,11 @@ def _build_draft_content(project: Project) -> dict:
         # Sidecar-ish metadata some CapCut versions expect at the top level.
         "draft_id": _new_id(),
         "version": 360000,
-        "platform": {"os": "windows", "app_version": "capcut-mcp"},
+        "new_version": new_version or _FALLBACK_NEW_VERSION,
+        # Provenance blocks: MUST carry this machine's device_id or CapCut
+        # rejects the draft as moved from another machine (#28).
+        "platform": platform_block,
+        "last_modified_platform": dict(platform_block),
     }
 
 
@@ -220,6 +306,13 @@ def _serialize_material(m: Material) -> dict:
     }
     if m.path is not None:
         out["path"] = m.path
+        # CapCut mirrors the media path under ``media_path`` for A/V materials.
+        if m.material_type in (
+            MaterialType.VIDEO,
+            MaterialType.IMAGE,
+            MaterialType.AUDIO,
+        ):
+            out["media_path"] = m.path
     if m.material_type == MaterialType.TEXT:
         # Bug #6: CapCut renders text from a JSON-STRING ``content`` of shape
         # ``{"text":...,"styles":[...]}``. A bare plain string does not render.
@@ -486,18 +579,154 @@ def _write_json(path: Path, obj: dict) -> None:
         json.dump(obj, fh, ensure_ascii=False, indent=2)
 
 
-def _write_sidecars(draft_dir: Path, project: Project, content: dict) -> None:
-    """Write the minimal set of sidecar files a CapCut draft folder carries.
+# metetype for the draft_materials media registry, keyed by domain type.
+_METETYPE: dict[MaterialType, str] = {
+    MaterialType.VIDEO: "video",
+    MaterialType.IMAGE: "photo",
+    MaterialType.AUDIO: "music",
+}
 
-    These are best-effort metadata files; the reader keys off
-    ``draft_content.json`` only. Kept minimal and schema-tolerant.
+
+def _draft_material_entry(m: Material) -> dict:
+    """One entry in the ``draft_meta_info.json`` ``draft_materials`` registry.
+
+    Bug #25: CapCut resolves a project's media through this registry (NOT just
+    ``draft_content.json``). An empty registry — or one with back-slash
+    ``file_Path`` values — makes CapCut treat the media as missing / the path as
+    abnormal. Mirrors the fields observed on real drafts.
+    """
+    now_s = int(time.time())
+    now_us = now_s * 1_000_000
+    duration = int(m.duration)
+    return {
+        "ai_group_type": "",
+        "create_time": now_s,
+        "duration": duration,
+        "enter_from": 0,
+        "extra_info": os.path.basename(m.path) if m.path else m.name,
+        "file_Path": m.path or "",
+        "height": int(m.height),
+        "id": str(uuid.uuid4()),
+        "import_time": now_s,
+        "import_time_ms": now_us,
+        "item_source": 1,
+        "md5": "",
+        "metetype": _METETYPE.get(m.material_type, "video"),
+        "roughcut_time_range": {"duration": duration, "start": 0},
+        "sub_time_range": {"duration": -1, "start": -1},
+        "type": 0,
+        "width": int(m.width),
+    }
+
+
+def _build_draft_materials(project: Project) -> list[dict]:
+    """Build the grouped ``draft_materials`` list CapCut expects.
+
+    Group ``type: 0`` holds all A/V media entries; the other group slots
+    (observed on real drafts) are emitted empty for structural fidelity.
+    """
+    media = [
+        _draft_material_entry(m)
+        for m in project.materials.values()
+        if m.path and m.material_type in _METETYPE
+    ]
+    groups = [{"type": 0, "value": media}]
+    for empty_type in (1, 2, 3, 6, 7, 8, 18):
+        groups.append({"type": empty_type, "value": []})
+    return groups
+
+
+def _write_sidecars(
+    staging_dir: Path, final_dir: Path, project: Project, content: dict
+) -> None:
+    """Write the sidecar metadata files a CapCut draft folder needs to open.
+
+    Files are written into ``staging_dir`` (the temp assembly dir), but path
+    fields record ``final_dir`` — the location the folder is atomically moved to
+    (#26).
+
+    The reader keys off ``draft_content.json`` only, but CapCut's project
+    browser reads ``draft_meta_info.json`` — including the ``draft_materials``
+    media registry — to list and validate a project. We emit a full meta file
+    matching the real schema, with forward-slash paths (#24) and a populated
+    media registry (#25).
     """
     draft_id = content.get("draft_id", _new_id())
+    fold_path = str(final_dir).replace("\\", "/")
+    root_path = str(final_dir.parent).replace("\\", "/")
+    now_us = int(time.time() * 1_000_000)
+    duration = int(project.duration)
+
     meta = {
+        "cloud_draft_cover": False,
+        "cloud_draft_sync": False,
+        "draft_cover": "draft_cover.jpg",
+        "draft_deeplink_url": "",
+        "draft_enterprise_info": {
+            "draft_enterprise_extra": "",
+            "draft_enterprise_id": "",
+            "draft_enterprise_name": "",
+            "enterprise_material": [],
+        },
+        "draft_fold_path": fold_path,
         "draft_id": draft_id,
+        "draft_is_ae_produce": False,
+        "draft_is_ai_packaging_used": False,
+        "draft_is_ai_shorts": False,
+        "draft_is_ai_translate": False,
+        "draft_is_article_video_draft": False,
+        "draft_is_cloud_temp_draft": False,
+        "draft_is_from_deeplink": "false",
+        "draft_is_invisible": False,
+        "draft_materials": _build_draft_materials(project),
+        "draft_materials_copied_info": [],
         "draft_name": project.name,
-        "draft_fold_path": str(draft_dir),
-        "tm_duration": int(project.duration),
-        "draft_root_path": str(draft_dir.parent),
+        "draft_need_rename_folder": False,
+        "draft_new_version": "",
+        "draft_removable_storage_device": "",
+        "draft_root_path": root_path,
+        "draft_segment_extra_info": [],
+        "draft_timeline_materials_size_": 0,
+        "draft_type": "",
+        "tm_draft_cloud_completed": "",
+        "tm_draft_cloud_modified": 0,
+        "tm_draft_create": now_us,
+        "tm_draft_modified": now_us,
+        "tm_draft_removed": 0,
+        "tm_duration": duration,
     }
-    _write_json(draft_dir / "draft_meta_info.json", meta)
+    _write_json(staging_dir / "draft_meta_info.json", meta)
+
+    # draft_virtual_store.json — material-id registry CapCut keeps alongside
+    # the meta. Mirrors the real structure: a type-0 store entry plus one
+    # type-1 (child_id, parent_id) pair per material.
+    virtual_store = {
+        "draft_materials": [],
+        "draft_virtual_store": [
+            {
+                "type": 0,
+                "value": [
+                    {
+                        "creation_time": 0,
+                        "display_name": "",
+                        "filter_type": 0,
+                        "id": "",
+                        "import_time": 0,
+                        "import_time_us": 0,
+                        "sort_sub_type": 0,
+                        "sort_type": 0,
+                        "subdraft_filter_type": 0,
+                    }
+                ],
+            },
+            {
+                "type": 1,
+                "value": [
+                    {"child_id": m.id, "parent_id": ""}
+                    for m in project.materials.values()
+                ],
+            },
+            {"type": 2, "value": []},
+        ],
+    }
+    _write_json(staging_dir / "draft_virtual_store.json", virtual_store)

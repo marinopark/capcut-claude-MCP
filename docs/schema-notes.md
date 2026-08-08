@@ -106,14 +106,74 @@ emitted on write (writer produces the minimum CapCut needs to open the project):
 
 A real folder carries ~25 files/dirs (`Resources/`, `Timelines/`, `draft_cover.jpg`,
 `draft_meta_info.json`, `draft_virtual_store.json`, `.bak` copies, `crypto_key_store.dat`,
-etc.). The **reader keys off `draft_content.json` only**. The **writer emits the
-minimum set**: `draft_content.json` + a minimal `draft_meta_info.json`.
+etc.). The **reader keys off `draft_content.json` only**. The **writer emits**:
+`draft_content.json` + a full `draft_meta_info.json`.
 
-> ⚠️ Open-in-CapCut sign-off still pending: a written draft round-trips through our
-> own reader, but whether CapCut's project browser lists/opens a folder with only
-> those two files has NOT yet been manually confirmed on this machine. If CapCut
-> does not show it, the next candidate is the root-level draft registry /
-> `draft_meta_info.json` fields CapCut indexes — extend `_write_sidecars`.
+### `draft_meta_info.json` is required to open (learned from open-in-CapCut)
+
+CapCut's project browser validates/opens a project through `draft_meta_info.json`,
+not just `draft_content.json`. A too-minimal meta made CapCut reject the project
+with a **"비정상적인 경로 / abnormal path"** error. Three fixes were needed:
+
+- **All paths use FORWARD slashes** (`C:/Users/...`). `os.path.abspath` yields
+  back-slashes on Windows; a back-slash media path in `draft_content.json` (or
+  `draft_meta_info.json`) triggers the abnormal-path rejection (Bug #24).
+- **`draft_materials` media registry must be populated** (Bug #25). It is a list
+  of groups keyed by `type`; group `type: 0` holds every A/V media file:
+  ```jsonc
+  { "type": 0, "value": [ {
+      "file_Path": "C:/.../clip.mp4",   // forward slashes
+      "metetype": "video",              // video | photo | music
+      "duration": <us>, "width", "height",
+      "id": "<uuid>", "extra_info": "clip.mp4",
+      "roughcut_time_range": {"start": 0, "duration": <us>},
+      "sub_time_range": {"start": -1, "duration": -1},
+      "type": 0, "item_source": 1, "md5": "", ... } ] }
+  ```
+  Empty group slots `type ∈ {1,2,3,6,7,8,18}` are emitted for fidelity.
+- **`draft_fold_path` / `draft_root_path` must record the FINAL folder**, not the
+  temp staging dir the files are assembled in before the atomic move (Bug #26).
+
+Other meta fields (`draft_id`, `draft_name`, `draft_cover`, `tm_duration`,
+`tm_draft_create/modified` in µs, and many `draft_is_*` boolean flags) mirror the
+real schema; see `draft_writer._write_sidecars`.
+
+### Device provenance check — THE actual "abnormal path" cause (confirmed)
+
+Fixes #24–#26 alone did NOT clear the "비정상적인 경로 / abnormal path" rejection.
+The confirmed root cause (draft opens in CapCut after this fix) is the
+**`platform` provenance block** in `draft_content.json`:
+
+- CapCut validates `platform.device_id` — this machine's CapCut identity (e.g.
+  `b423a02bc012c1eff680e8291a72df2d`). A draft with an empty or foreign
+  `device_id` is treated as *moved from another machine* and rejected with the
+  abnormal-path error (Bug #28). This is CapCut's draft-migration detection.
+- Also required: a plausible `platform.app_version` (`"8.7.0"`, not an arbitrary
+  string), `app_id` (359289), `app_source` (`"cc"`), a `last_modified_platform`
+  twin block, and a non-empty `new_version` (`"175.0.0"`).
+
+The writer does not hardcode these: `_harvest_environment()` scans sibling
+drafts in the drafts dir for a readable `draft_content.json` and copies its
+`platform` block + `new_version` (fallback constants only if no sibling
+exists). This stamps the new draft with the machine's real identity.
+
+Additional fixes needed to open:
+
+- **Video material `width`/`height` must be non-zero** (Bug #27). Without
+  ffprobe, dimensions fall back to the project canvas size. CapCut heals many
+  missing fields when opening a draft (it rewrote our 9-key content to its full
+  36-key schema and generated speed/canvas/sound_channel sub-materials), but it
+  does NOT heal 0×0 dimensions or the provenance block.
+- **`draft_virtual_store.json`** is written alongside the meta: a type-0 store
+  entry plus one type-1 `{child_id: <material id>, parent_id: ""}` pair per
+  material.
+
+### Minimum file set to open in CapCut (confirmed working)
+
+`draft_content.json` + `draft_meta_info.json` (full schema, populated
+`draft_materials`) + `draft_virtual_store.json`. CapCut self-generates the rest
+(`Timelines/`, `draft_settings`, `.bak`, covers, `root_meta_info.json` entry) on
+first open.
 
 ## Encryption / format variants
 

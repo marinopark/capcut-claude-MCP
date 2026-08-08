@@ -155,6 +155,20 @@ def _resolve_media_duration(path: str, duration_us: Optional[int], kind: str) ->
     return probed
 
 
+def _resolve_video_dimensions(path: str, project: Project) -> tuple[int, int]:
+    """Resolve a video's pixel dimensions for its material entry.
+
+    Bug #27: CapCut refuses to open a project whose video material has
+    ``width``/``height`` of 0 (0×0 breaks the editor's layout math). Probe via
+    ffprobe when available; otherwise fall back to the project's canvas size so
+    the material always carries non-zero, plausible dimensions.
+    """
+    dims = locator.probe_media_dimensions(Path(path))
+    if dims is not None and dims[0] > 0 and dims[1] > 0:
+        return int(dims[0]), int(dims[1])
+    return int(project.width), int(project.height)
+
+
 # ---------------------------------------------------------------------------
 # Public API — project + segment construction
 # ---------------------------------------------------------------------------
@@ -201,12 +215,15 @@ def add_video(
     speed_val = float(speed)
     target_duration = _speed_scaled_duration(duration, speed_val)
 
+    vid_width, vid_height = _resolve_video_dimensions(abs_path, proj)
     material = Material(
         id=_new_id(),
         material_type=MaterialType.VIDEO,
         path=abs_path,
         name=Path(abs_path).name,
         duration=duration,
+        width=vid_width,
+        height=vid_height,
     )
     proj.add_material(material)
 
